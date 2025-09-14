@@ -1,0 +1,167 @@
+name: Travel&Joy CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: traveljoy_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install backend dependencies
+        run: cd server && npm ci
+
+      - name: Lint backend code
+        run: cd server && npm run lint
+
+      - name: Run backend tests
+        run: cd server && npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/traveljoy_test
+          JWT_SECRET: test_secret_key
+          NODE_ENV: test
+
+  test-frontend:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        run: cd client && npm ci
+
+      - name: Lint frontend code
+        run: cd client && npm run lint
+
+      - name: Build frontend
+        run: cd client && npm run build
+
+      - name: Run frontend tests
+        run: cd client && npm test -- --coverage --watchAll=false
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: traveljoy_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install backend dependencies
+        run: cd server && npm ci
+
+      - name: Install frontend dependencies
+        run: cd client && npm ci
+
+      - name: Install E2E test dependencies
+        run: cd tests && npm ci
+
+      - name: Install Playwright Browsers
+        run: cd tests && npx playwright install --with-deps
+
+      - name: Start backend server
+        run: cd server && npm start &
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/traveljoy_test
+          JWT_SECRET: test_secret_key
+          NODE_ENV: test
+          PORT: 5000
+
+      - name: Wait for backend
+        run: npx wait-on http://localhost:5000/api/health
+
+      - name: Run Playwright tests
+        run: cd tests && npm run test:e2e
+        env:
+          CI: true
+
+      - name: Upload Playwright Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/playwright-report/
+          retention-days: 30
+
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend, e2e-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install and build frontend
+        run: |
+          cd client
+          npm ci
+          npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: client/build/
+
+      # Add deployment steps here based on your hosting provider
+      # Example for Netlify, Vercel, AWS S3, etc.
